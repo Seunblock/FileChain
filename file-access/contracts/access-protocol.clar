@@ -55,6 +55,39 @@
     }
 )
 
+;; Validation Functions
+(define-private (validate-string (input (string-ascii 256)) (max-len uint))
+    (let
+        ((len (len input)))
+        (and
+            (<= len max-len)
+            (> len u0)
+        )
+    )
+)
+
+(define-private (validate-price (price uint))
+    (and
+        (>= price u0)
+        (<= price u1000000000000) ;; Set reasonable maximum price
+    )
+)
+
+(define-private (validate-duration (duration uint))
+    (and
+        (> duration u0)
+        (<= duration u52560) ;; Max duration ~1 year in blocks
+    )
+)
+
+(define-private (validate-access-type (access-type (string-ascii 10)))
+    (or
+        (is-eq access-type "preview")
+        (is-eq access-type "full")
+        (is-eq access-type "commercial")
+    )
+)
+
 ;; Private Functions
 (define-private (calculate-platform-fee (amount uint))
     (/ (* amount (var-get platform-fee)) u10000)
@@ -62,23 +95,22 @@
 
 (define-private (distribute-revenue (file-id (string-ascii 64)) (payment uint))
     (let (
-        (revenue-info (unwrap! (map-get? revenue-sharing {file-id: file-id}) (ok payment)))
+        (revenue-info (map-get? revenue-sharing {file-id: file-id}))
         (owner-share (- payment (calculate-platform-fee payment)))
         )
-        (if (is-some (get contributors revenue-info))
-            (begin
-                ;; Distribute to contributors based on shares
-                (map-set revenue-sharing
-                    {file-id: file-id}
-                    {
-                        contributors: (get contributors revenue-info),
-                        shares: (get shares revenue-info),
-                        total-revenue: (+ payment (get total-revenue revenue-info))
-                    }
-                )
-                (ok true))
-            ;; If no contributors, all revenue goes to owner
-            (ok true)
+        (match revenue-info
+            revenue-data
+                (begin
+                    (map-set revenue-sharing
+                        {file-id: file-id}
+                        {
+                            contributors: (get contributors revenue-data),
+                            shares: (get shares revenue-data),
+                            total-revenue: (+ payment (get total-revenue revenue-data))
+                        }
+                    )
+                    true)
+            false
         )
     )
 )
@@ -96,6 +128,11 @@
     (let
         ((caller tx-sender))
         (begin
+            (asserts! (validate-string file-id u64) ERR_INVALID_PARAMS)
+            (asserts! (validate-string file-hash u64) ERR_INVALID_PARAMS)
+            (asserts! (validate-price price) ERR_INVALID_PARAMS)
+            (asserts! (validate-string content-type u10) ERR_INVALID_PARAMS)
+            (asserts! (validate-string description u256) ERR_INVALID_PARAMS)
             (asserts! (is-none (map-get? file-registry {file-id: file-id})) 
                 ERR_ALREADY_EXISTS)
             (map-set file-registry
@@ -134,6 +171,9 @@
         ((file (unwrap! (map-get? file-registry {file-id: file-id}) ERR_DOES_NOT_EXIST))
          (caller tx-sender))
         (begin
+            (asserts! (validate-string file-id u64) ERR_INVALID_PARAMS)
+            (asserts! (validate-duration duration) ERR_INVALID_PARAMS)
+            (asserts! (validate-access-type access-type) ERR_INVALID_PARAMS)
             (asserts! (is-eq (get owner file) caller) ERR_NOT_AUTHORIZED)
             (map-set access-rights
                 {file-id: file-id, user: user}
@@ -159,6 +199,8 @@
          (caller tx-sender)
          (payment (get price file)))
         (begin
+            (asserts! (validate-string file-id u64) ERR_INVALID_PARAMS)
+            (asserts! (validate-access-type access-type) ERR_INVALID_PARAMS)
             (asserts! (not (is-eq (get owner file) caller)) ERR_INVALID_PARAMS)
             ;; Process payment
             (try! (stx-transfer? payment caller (get owner file)))
@@ -172,8 +214,8 @@
                     last-activity: block-height
                 }
             )
-            ;; Distribute revenue
-            (try! (distribute-revenue file-id payment))
+            ;; Distribute revenue without try! since it returns void
+            (distribute-revenue file-id payment)
             ;; Grant access
             (map-set access-rights
                 {file-id: file-id, user: caller}
@@ -199,6 +241,9 @@
         ((file (unwrap! (map-get? file-registry {file-id: file-id}) ERR_DOES_NOT_EXIST))
          (caller tx-sender))
         (begin
+            (asserts! (validate-string file-id u64) ERR_INVALID_PARAMS)
+            (asserts! (> (len contributors) u0) ERR_INVALID_PARAMS)
+            (asserts! (is-eq (len contributors) (len shares)) ERR_INVALID_PARAMS)
             (asserts! (is-eq (get owner file) caller) ERR_NOT_AUTHORIZED)
             (asserts! (is-eq (fold + shares u0) u10000) ERR_INVALID_PARAMS)
             (map-set revenue-sharing
@@ -260,6 +305,7 @@
 ;; Transfer contract ownership
 (define-public (transfer-ownership (new-owner principal))
     (begin
+        (asserts! (not (is-eq new-owner tx-sender)) ERR_INVALID_PARAMS)
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
         (var-set contract-owner new-owner)
         (ok true)
